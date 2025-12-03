@@ -3,11 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 import time
+import asyncio
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
 from app.api.v1.router import api_router
-from app.db.session import init_db, check_db_connection
-
+from app.db.session import init_db, check_db_connection, SessionLocal
+from app.services.ai_service import AIService
 
 # Crear aplicación FastAPI
 app = FastAPI(
@@ -18,6 +21,22 @@ app = FastAPI(
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json"
 )
+
+# Scheduler instance
+scheduler = AsyncIOScheduler()
+
+async def scheduled_sync():
+    """Function to run daily sync via scheduler"""
+    logger.info("Executing scheduled daily sync...")
+    try:
+        db = SessionLocal()
+        service = AIService()
+        # Using internal method to force sync
+        await service._sync_and_analyze(db)
+        db.close()
+        logger.info("Scheduled sync completed successfully")
+    except Exception as e:
+        logger.error(f"Scheduled sync failed: {e}")
 
 # Configurar CORS
 app.add_middleware(
@@ -87,6 +106,16 @@ async def startup_event():
     # Inicializar base de datos
     init_db()
     
+    # Start Scheduler
+    try:
+        # Schedule job to run at 00:05 AM every day
+        trigger = CronTrigger(hour=0, minute=5, timezone="UTC") 
+        scheduler.add_job(scheduled_sync, trigger)
+        scheduler.start()
+        logger.info("Scheduler started: Daily sync set for 00:05 UTC")
+    except Exception as e:
+        logger.error(f"Failed to start scheduler: {e}")
+
     logger.info("Application started successfully")
 
 

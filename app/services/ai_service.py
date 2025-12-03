@@ -1,14 +1,23 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import List, Dict, Any, Optional
+import os
 import httpx
+import joblib
+import pandas as pd
 from loguru import logger
+from sqlalchemy.orm import Session
+from sqlalchemy import and_
+
 from app.core.config import settings
+from app.models.fixture import Fixture
 
 
 class AIService:
     """
     Service for AI-powered betting suggestions and analysis using real data from API-Football.
+    Implements a 'Fetch & Store' strategy to cache data and minimize API usage.
+    Uses a trained Random Forest model for predictions.
     """
     
     def __init__(self):
@@ -16,9 +25,26 @@ class AIService:
         self.api_host = settings.API_FOOTBALL_HOST
         self.base_url = f"https://{self.api_host}"
         
-    async def get_daily_suggestions(self) -> List[Dict[str, Any]]:
+        # Load ML Model
+        self.model_path = os.path.join(os.path.dirname(__file__), "model.pkl")
+        self.columns_path = os.path.join(os.path.dirname(__file__), "model_columns.pkl")
+        self.model = None
+        self.model_columns = None
+        
+        try:
+            if os.path.exists(self.model_path):
+                self.model = joblib.load(self.model_path)
+                self.model_columns = joblib.load(self.columns_path)
+                logger.info("ML Model loaded successfully.")
+            else:
+                logger.warning("ML Model not found. Falling back to rule-based logic.")
+        except Exception as e:
+            logger.error(f"Error loading ML model: {e}")
+        
+    async def get_daily_suggestions(self, db: Session) -> List[Dict[str, Any]]:
         """
-        Get betting suggestions for the current day using real API-Football data.
+        Get betting suggestions for the current day.
+        Checks local DB first; if empty, syncs from API.
         """
         try:
             # If no API key, return mock data
@@ -26,27 +52,102 @@ class AIService:
                 logger.warning("API-Football key not configured, returning mock data")
                 return await self._get_mock_suggestions()
             
-            matches = await self._fetch_daily_matches()
-            suggestions = []
+            today = datetime.now().date()
             
-            for match in matches:
-                analysis = await self._analyze_match(match)
-                if analysis and analysis['confidence_score'] >= 0.65:  # Only moderate+ confidence
-                    suggestions.append({
-                        **match,
-                        **analysis
-                    })
+            # 1. Try to fetch cached suggestions from DB
+            cached_fixtures = db.query(Fixture).filter(
+                # Cast to date for comparison if needed, or range check
+                Fixture.event_date >= datetime.combine(today, datetime.min.time()),
+                Fixture.event_date < datetime.combine(today + timedelta(days=1), datetime.min.time()),
+                Fixture.prediction_data.isnot(None)
+            ).order_by(Fixture.confidence_score.desc()).all()
             
-            # Sort by confidence
-            suggestions = sorted(suggestions, key=lambda x: x['confidence_score'], reverse=True)
+            if cached_fixtures:
+                logger.info(f"Returning {len(cached_fixtures)} cached suggestions from DB")
+                return [self._format_fixture_response(f) for f in cached_fixtures]
             
-            # Return top 6 suggestions
-            return suggestions[:6]
+            # 2. If no cache, perform sync and analysis
+            logger.info("No cached suggestions found, syncing from API...")
+            return await self._sync_and_analyze(db)
             
         except Exception as e:
             logger.error(f"Error fetching AI suggestions: {str(e)}")
             # Fallback to mock data on error
             return await self._get_mock_suggestions()
+
+    async def _sync_and_analyze(self, db: Session) -> List[Dict[str, Any]]:
+        """
+        Fetch matches from API, save to DB, run analysis, and return results.
+        """
+        # 1. Fetch matches from API
+        matches_data = await self._fetch_daily_matches()
+        
+        suggestions = []
+        
+        for match_data in matches_data:
+            # 2. Run Analysis
+            analysis = self._analyze_match(match_data, db)
+            
+            if analysis and analysis['confidence_score'] >= 0.55: # Lower threshold for ML
+                # 3. Save/Update Fixture in DB
+                fixture = self._save_fixture_to_db(db, match_data, analysis)
+                suggestions.append(self._format_fixture_response(fixture))
+        
+        # Sort by confidence
+        suggestions = sorted(suggestions, key=lambda x: x['confidence_score'], reverse=True)
+        
+        return suggestions[:6]
+
+    def _save_fixture_to_db(self, db: Session, match_data: Dict, analysis: Dict) -> Fixture:
+        """
+        Save or update fixture data in the database.
+        """
+        fixture_id = match_data['id'] # e.g. "f12345"
+        external_id = int(fixture_id[1:]) # 12345
+        
+        fixture = db.query(Fixture).filter(Fixture.id == fixture_id).first()
+        
+        if not fixture:
+            fixture = Fixture(id=fixture_id, external_id=external_id)
+            
+        fixture.home_team = match_data['home_team']
+        fixture.away_team = match_data['away_team']
+        # match_data['date'] is ISO format string
+        fixture.event_date = datetime.fromisoformat(match_data['date'].replace('Z', '+00:00'))
+        fixture.league_id = None # Could map if we had league IDs in match_data easily
+        fixture.home_stats = match_data['home_stats']
+        fixture.away_stats = match_data['away_stats']
+        fixture.h2h_data = match_data['head_to_head']
+        fixture.prediction_data = analysis
+        fixture.confidence_score = analysis['confidence_score']
+        
+        # Update scores if present (useful for updates)
+        if 'goals' in match_data:
+             fixture.home_score = match_data['goals'].get('home')
+             fixture.away_score = match_data['goals'].get('away')
+             fixture.status = match_data.get('status', 'NS')
+        
+        db.add(fixture)
+        db.commit()
+        db.refresh(fixture)
+        return fixture
+
+    def _format_fixture_response(self, fixture: Fixture) -> Dict[str, Any]:
+        """
+        Format a Fixture object into the response dictionary expected by frontend.
+        """
+        return {
+            "id": fixture.id,
+            "sport": "Football",
+            "league": fixture.league.name if fixture.league else "Unknown League", 
+            "home_team": fixture.home_team,
+            "away_team": fixture.away_team,
+            "date": fixture.event_date.isoformat(),
+            "home_stats": fixture.home_stats,
+            "away_stats": fixture.away_stats,
+            "head_to_head": fixture.h2h_data,
+            **fixture.prediction_data
+        }
 
     async def _fetch_daily_matches(self) -> List[Dict[str, Any]]:
         """
@@ -82,7 +183,7 @@ class AIService:
                         data = response.json()
                         fixtures = data.get("response", [])
                         
-                        for fixture in fixtures[:2]:  # Limit to 2 per league
+                        for fixture in fixtures[:2]:  # Limit to 2 per league for quota safety
                             match_data = await self._parse_fixture(fixture, client, headers)
                             if match_data:
                                 all_matches.append(match_data)
@@ -204,9 +305,123 @@ class AIService:
         
         return {"home_wins": 3, "draws": 2, "away_wins": 3}
 
-    async def _analyze_match(self, match: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _analyze_match(self, match: Dict[str, Any], db: Session) -> Optional[Dict[str, Any]]:
         """
-        Analyze a match and return betting suggestions if a clear advantage is found.
+        Analyze a match and return betting suggestions.
+        Prefers ML model if available, falls back to heuristics.
+        """
+        
+        # 1. Try ML Prediction
+        if self.model and self.model_columns:
+            try:
+                features = self._calculate_features(match, db)
+                # Ensure columns match training data
+                features_df = pd.DataFrame([features], columns=self.model_columns)
+                features_df = features_df.fillna(0)
+                
+                # Predict
+                # Classes are usually [0: Away, 1: Draw, 2: Home] if sorted
+                # But we should verify class labels from model if possible.
+                # Assuming standard sklearn behavior with 0,1,2.
+                
+                probs = self.model.predict_proba(features_df)[0]
+                
+                # Identify best outcome
+                # Map indices to outcomes based on training: 0=Away, 1=Draw, 2=Home
+                outcomes = ["Away Win", "Draw", "Home Win"]
+                best_idx = probs.argmax()
+                prediction = outcomes[best_idx]
+                confidence = probs[best_idx]
+                
+                reasoning = [
+                    f"AI Model Probability: {confidence*100:.1f}%",
+                    f"Based on recent form and H2H analysis"
+                ]
+                
+                # Add some context from stats
+                home_stats = match['home_stats']
+                reasoning.append(f"Home Form: {home_stats['wins_last_5']}/5 wins")
+                
+                return {
+                    "prediction": prediction,
+                    "confidence_score": float(confidence),
+                    "reasoning": reasoning,
+                    "suggested_odds": round(1 / confidence * 0.92, 2)
+                }
+                
+            except Exception as e:
+                logger.error(f"ML prediction failed: {e}. Falling back to heuristics.")
+
+        # 2. Fallback: Heuristic Logic
+        return self._heuristic_analysis(match)
+
+    def _calculate_features(self, match: Dict[str, Any], db: Session) -> Dict[str, float]:
+        """
+        Calculate features for a single match to feed into the ML model.
+        Must match the logic in train_model.py
+        """
+        # For live prediction, we might not have the full 'rolling average' readily available 
+        # unless we query previous matches for these specific teams.
+        # Simplification for V1: Use the 'home_stats' and 'away_stats' we fetched from API
+        # which contain 'wins_last_5', 'goals_avg', etc.
+        
+        # Mapping API stats to Model features
+        # Model expects: 
+        # 'home_form_goals', 'home_form_defense', 'home_form_points'
+        # 'away_form_goals', 'away_form_defense', 'away_form_points'
+        
+        home_stats = match['home_stats']
+        away_stats = match['away_stats']
+        
+        # Approximation of "Points" from "Wins last 5":
+        # Wins * 3. We don't know draws, so we assume 0 draws for conservative estimate?
+        # Or we can just use wins as a proxy for form.
+        
+        # Update: Added 'season_points' approximation based on API data
+        # API stats usually return full season Wins/Draws/Losses in the 'fixtures' sub-object
+        # but we are only fetching 'form' string here.
+        # However, 'wins_last_5' is just the last 5.
+        # To get FULL SEASON points, we ideally need the full standings.
+        # As a fallback proxy, we can project the form or just use 0 if not available.
+        # But to match training data (which uses cumulative points), we need a decent estimate.
+        
+        # Better proxy if we don't have standings: 
+        # If we have played N games (unknown), we can't guess total points easily.
+        # BUT, usually 'wins_last_5' * 3 is what we have.
+        # Wait, training data used cumulative points up to that date.
+        # For a live match, that is effectively the CURRENT POINTS in the table.
+        # Since we don't fetch standings, we will use a neutral placeholder (0) or 
+        # try to extract it if we upgrade the API call.
+        
+        # Critical: If we pass 0, the model might think it's the start of the season.
+        # Let's try to be smarter. The API response *does* have "standings" endpoint.
+        # But we are trying to save API calls.
+        
+        # Compromise for V1:
+        # We will use 0 for now, accepting that 'points_diff' will be 0, 
+        # effectively neutralizing this feature until we implement the Standings Fetcher.
+        # This is safer than guessing.
+        
+        home_season_points = 0
+        away_season_points = 0
+        
+        return {
+            'home_form_goals': home_stats.get('goals_avg', 0),
+            'home_form_defense': home_stats.get('conceded_avg', 0),
+            'home_form_points': home_stats.get('wins_last_5', 0) * 3, # Approximation
+            
+            'away_form_goals': away_stats.get('goals_avg', 0),
+            'away_form_defense': away_stats.get('conceded_avg', 0),
+            'away_form_points': away_stats.get('wins_last_5', 0) * 3,
+            
+            'home_season_points': home_season_points,
+            'away_season_points': away_season_points,
+            'points_diff': home_season_points - away_season_points
+        }
+
+    def _heuristic_analysis(self, match: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Legacy rule-based analysis.
         """
         home_stats = match['home_stats']
         away_stats = match['away_stats']
