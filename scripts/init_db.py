@@ -363,8 +363,8 @@ def main():
         print("="*60)
         print("\n🌐 Acceso a la aplicación:")
         print(f"   Frontend: http://localhost:3000")
-        print(f"   API Docs: http://localhost:8000/docs")
-        print(f"   Backend: http://localhost:8000\n")
+        print(f"   API Docs: http://localhost:8075/docs")
+        print(f"   Backend: http://localhost:8075\n")
         
     except Exception as e:
         print(f"❌ Error: {e}")

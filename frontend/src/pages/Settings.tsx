@@ -31,7 +31,7 @@ export const Settings: React.FC = () => {
   });
 
   const [success, setSuccess] = useState(false);
-  const [error, setError] = useState('');
+  const [error] = useState('');
 
   const handleChange = (field: string, value: any) => {
     setSettings(prev => ({ ...prev, [field]: value }));

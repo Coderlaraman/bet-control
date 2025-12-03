@@ -27,6 +27,13 @@ class Fixture(Base):
     home_score = Column(Integer, nullable=True)
     away_score = Column(Integer, nullable=True)
     
+    # Advanced Metrics (from Matches.csv)
+    home_elo = Column(Float, nullable=True)
+    away_elo = Column(Float, nullable=True)
+    home_odds = Column(Float, nullable=True)
+    draw_odds = Column(Float, nullable=True)
+    away_odds = Column(Float, nullable=True)
+    
     # Datos JSON crudos o procesados para análisis
     home_stats = Column(JSON, nullable=True)
     away_stats = Column(JSON, nullable=True)

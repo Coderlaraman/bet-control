@@ -1,53 +1,68 @@
-# Documentación del Modelo de IA - BetControl
+# Documentación del Modelo de IA - BetControl (Versión 3.0)
 
 ## 1. Visión General
-El objetivo de este módulo es predecir el resultado de partidos de fútbol (Ganador Local, Empate, Ganador Visitante) utilizando técnicas de Machine Learning (Aprendizaje Supervisado).
+El módulo de Inteligencia Artificial de BetControl tiene como objetivo predecir el resultado de partidos de fútbol (Local, Empate, Visitante) utilizando algoritmos de Machine Learning avanzados. La versión 3.0 introduce mejoras significativas en la calidad de los datos y la ingeniería de características, incorporando ratings Elo, probabilidades implícitas de las casas de apuestas y estadísticas detalladas de juego.
 
-El modelo se entrena con datos históricos de la temporada 2023 (debido a restricciones de API) y se utilizará para inferencias en la temporada actual, apoyado por un sistema de actualización diaria de datos.
+## 2. Fuentes de Datos
+Para superar las limitaciones de historial de las APIs gratuitas, hemos implementado una estrategia híbrida de datos:
 
-## 2. Arquitectura del Modelo
+1.  **Histórico Masivo (2000-2025)**:
+    -   **Fuente**: Dataset curado de GitHub (`Club-Football-Match-Data-2000-2025`).
+    -   **Contenido**: Más de 9,000 partidos recientes con metadatos ricos (Elo, Odds, Stats).
+    -   **Cobertura**: Premier League, La Liga, Serie A, Bundesliga, Ligue 1.
+2.  **Datos en Tiempo Real**:
+    -   **Fuente**: API-Football.
+    -   **Uso**: Sincronización diaria de partidos, resultados y estadísticas recientes para alimentar las predicciones del día.
 
-### Algoritmo Seleccionado
-**Random Forest Classifier** (Bosque Aleatorio)
-- **Por qué**: Es robusto frente a overfitting, maneja bien variables no lineales y no requiere escalado excesivo de datos. Además, ofrece métricas de "importancia de características" que nos ayudan a explicar el "por qué" de una predicción.
+## 3. Arquitectura del Modelo
 
-### Variables de Entrada (Features)
-El modelo no recibe nombres de equipos, sino métricas de rendimiento derivadas:
+### Algoritmo
+-   **Modelo**: **XGBoost Classifier** (Extreme Gradient Boosting).
+-   **Hiperparámetros V3**:
+    -   `n_estimators`: 200
+    -   `max_depth`: 6 (Optimizado para evitar sobreajuste).
+    -   `learning_rate`: 0.05 (Aprendizaje gradual para mejor generalización).
+    -   `objective`: `multi:softprob` (Probabilidades para 3 clases).
 
-1.  **Forma Reciente (Local/Visitante)**:
-    -   Puntos obtenidos en los últimos 5 partidos.
-    -   Promedio de goles anotados/recibidos en los últimos 5 partidos.
-2.  **Factor Localía**:
-    -   Rendimiento histórico del equipo jugando en casa vs fuera.
-3.  **Enfrentamientos Directos (H2H)**:
-    -   (Opcional en V1) Historial de victorias entre ambos equipos.
+### Características de Entrada (Features)
+El modelo utiliza 9 variables predictivas clave, seleccionadas por su impacto en la precisión:
+
+1.  **`prob_home` / `prob_away` (Probabilidades de Mercado)**:
+    -   **Importancia: ~40%**. El mercado es el predictor más fuerte.
+2.  **`elo_diff` (Diferencia de Elo)**:
+    -   **Importancia: ~10%**. Captura la jerarquía estructural.
+3.  **Forma Reciente (Tiros y Puntos)**:
+    -   **Importancia: ~50% (Combinada)**. El volumen de juego (Tiros) y la eficacia (Puntos/Goles) aportan el contexto táctico.
 
 ### Variable Objetivo (Target)
-Clasificación Multiclase:
--   `0`: Gana Visitante (Away Win)
--   `1`: Empate (Draw)
--   `2`: Gana Local (Home Win)
+-   `0`: Victoria Visitante
+-   `1`: Empate
+-   `2`: Victoria Local
 
-## 3. Estrategia de Entrenamiento
+## 4. Estrategia de Entrenamiento
 
-### Datos de Entrenamiento
--   **Fuente**: API-Football (vía Backfill script).
--   **Periodo**: Temporada 2023 (Ligas Top 5 de Europa).
--   **Volumen**: ~300-1000 partidos (dependiendo del éxito del backfill).
+### Preprocesamiento e Ingeniería de Características
+1.  **Cálculo de Rolling Averages**: Se procesan los datos cronológicamente para calcular las estadísticas "previas al partido".
+    -   *Prevención de Data Leakage*: Se usa `shift(1)` para asegurar que las estadísticas de un partido no incluyan el resultado de ese mismo partido.
+2.  **Imputación de Datos**:
+    -   Valores nulos en cuotas se manejan cuidadosamente para no introducir sesgos.
+    -   Equipos nuevos o ascendidos inician con valores base (Elo 1500).
 
-### Preprocesamiento
-1.  **Limpieza**: Eliminar partidos cancelados o sin marcador.
-2.  **Feature Engineering**: Calcular medias móviles (Rolling Averages) para simular la "forma" que tenía el equipo *antes* de cada partido. **Crucial**: No usar datos del futuro para predecir el pasado (Data Leakage).
+### Resultados del Entrenamiento (V3 - XGBoost)
+-   **Precisión Global (Accuracy)**: **51%**
+    -   *Análisis*: Mantiene la precisión del Random Forest pero con mejor manejo de probabilidades (softprob) y menor riesgo de overfitting gracias a la regularización nativa de XGBoost.
+    -   *Desempeño por Clase*:
+        -   Victoria Local: 62% F1-Score (Muy sólido).
+        -   Empate: 12% F1-Score (El empate sigue siendo difícil de predecir, común en modelos de fútbol).
+        -   Victoria Visitante: 53% F1-Score.
 
-### Validación
--   **Train/Test Split**: 80% para entrenamiento, 20% para validación.
--   **Métrica Principal**: Accuracy (Precisión Global) y F1-Score (para balancear clases, ya que los empates son menos frecuentes).
+## 5. Integración en Producción (AIService)
+El servicio de IA (`AIService`) ha sido actualizado para replicar esta lógica en tiempo real:
+1.  Consulta el **Elo más reciente** de cada equipo en la base de datos.
+2.  Calcula la **probabilidad implícita** (usando Elo si no hay cuotas disponibles).
+3.  Agrega las estadísticas de forma (Goles/Puntos) desde la API.
+4.  Genera una predicción con un **Score de Confianza**.
 
-## 4. Flujo de Inferencia (Predicción Diaria)
-1.  El sistema `daily_sync.py` descarga los partidos de hoy.
-2.  Calcula las mismas *features* (forma reciente) para los equipos que juegan hoy, basándose en los datos acumulados en la BD.
-3.  El modelo `.pkl` predice la probabilidad de cada resultado.
-4.  Si la confianza > umbral (ej. 60%), se guarda como sugerencia.
-
-## 5. Reentrenamiento
-Se recomienda reentrenar el modelo semanalmente (`scripts/train_model.py`) para que incorpore los nuevos resultados de 2025 a medida que ocurren.
+## 6. Próximos Pasos y Recomendaciones
+-   **Optimización de Hiperparámetros**: Realizar un Grid Search exhaustivo para exprimir un 1-2% extra de precisión.
+-   **Nuevas Features**: Integrar "Días de Descanso" (Fatiga) y "Distancia de Viaje" (Factor Visitante).

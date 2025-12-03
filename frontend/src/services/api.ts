@@ -148,6 +148,7 @@ export const betsAPI = {
   updateBet: (id: number, data: Partial<Bet>) => api.put<Bet>(`/bets/${id}`, data),
   deleteBet: (id: number) => api.delete(`/bets/${id}`),
   getBettingStats: () => api.get<BettingStats>('/bets/summary/stats'),
+  parseBet: (text: string) => api.post<any>('/bets/smart-entry', { text }),
 };
 
 // Bankroll API
@@ -156,6 +157,13 @@ export const bankrollAPI = {
   updateConfig: (data: any) => api.put('/bankroll/config', data),
   deposit: (data: { amount: number }) => api.post('/bankroll/deposit', data),
   withdraw: (data: { amount: number }) => api.post('/bankroll/withdraw', data),
+};
+
+// AI API
+export const aiAPI = {
+  getSuggestions: () => api.get('/ai/suggestions'),
+  getDavidGoliath: () => api.get('/ai-modules/david-goliath'),
+  askOracle: (query: string) => api.post('/ai-modules/oracle/ask', { query }),
 };
 
 export default api;

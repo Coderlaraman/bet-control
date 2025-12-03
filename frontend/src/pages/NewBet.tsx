@@ -37,23 +37,85 @@ export const NewBet: React.FC = () => {
   const navigate = useNavigate();
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [smartInput, setSmartInput] = useState('');
+  const [isParsing, setIsParsing] = useState(false);
   
-  const { register, handleSubmit, formState: { errors }, reset } = useForm<BetFormData>();
+  const { register, handleSubmit, setValue, formState: { errors } } = useForm<BetFormData>();
+
+  const handleSmartParse = async () => {
+    if (!smartInput.trim()) return;
+    setIsParsing(true);
+    try {
+      const response = await betsAPI.parseBet(smartInput);
+      const parsedData = response.data;
+      
+      // Auto-fill form fields
+      if (parsedData.stake) setValue('stake', parsedData.stake);
+      if (parsedData.home_team) setValue('home_team', parsedData.home_team);
+      if (parsedData.away_team) setValue('away_team', parsedData.away_team);
+      
+      // Construct event name if teams are found
+      if (parsedData.home_team && parsedData.away_team) {
+        setValue('event_name', `${parsedData.home_team} vs ${parsedData.away_team}`);
+      }
+      
+      // Set description
+      setValue('bet_description', smartInput);
+      
+      // Try to map market (Basic mapping)
+      if (parsedData.market) {
+        // This would need a more robust mapping in a real app
+        if (parsedData.market === "Match Winner") setValue('market_id', 1);
+        if (parsedData.market === "Over/Under") setValue('market_id', 2);
+      }
+
+      // Set default values for required fields if missing
+      setValue('sport_id', 1); // Default to Soccer
+      setValue('event_date', new Date().toISOString().split('T')[0]); // Today
+      
+    } catch (err) {
+      console.error("Error parsing bet:", err);
+      setError('Could not understand the bet description. Please fill manually.');
+    } finally {
+      setIsParsing(false);
+    }
+  };
 
   const onSubmit = async (data: BetFormData) => {
     setError('');
     setIsLoading(true);
 
     try {
+      // Construct ISO datetime string from date and time
+      let eventDateTime = data.event_date;
+      if (data.event_time) {
+        eventDateTime = `${data.event_date}T${data.event_time}:00`;
+      } else {
+        eventDateTime = `${data.event_date}T00:00:00`;
+      }
+
       const betData = {
         ...data,
+        event_date: eventDateTime,
+        event_time: undefined, // Don't send raw time string to avoid validation error
         bet_type_id: 1, // Single bet por defecto
       };
       
       await betsAPI.createBet(betData);
       navigate('/bets');
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Error creating bet');
+      const detail = err.response?.data?.detail;
+      if (Array.isArray(detail)) {
+        // Handle Pydantic validation errors (list of objects)
+        setError(detail.map((e: any) => e.msg).join(', '));
+      } else if (typeof detail === 'object' && detail !== null) {
+        // Handle generic object errors
+        setError(JSON.stringify(detail));
+      } else {
+        // Handle string errors or default
+        // If detail is not provided (e.g. 500 error), try to use statusText or fallback
+        setError(detail || err.response?.statusText || 'Error creating bet');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -71,6 +133,44 @@ export const NewBet: React.FC = () => {
             {error}
           </Alert>
         )}
+
+        {/* Smart Entry Section */}
+        <Box sx={{ mb: 4, p: 2, bgcolor: '#f5f5f5', borderRadius: 1 }}>
+          <Typography variant="h6" gutterBottom>
+            Smart Bet Entry (AI Powered)
+          </Typography>
+          <Typography variant="body2" color="text.secondary" paragraph>
+            Describe your bet naturally (e.g., "I bet 50 dollars on Real Madrid to beat Barcelona") or use voice input.
+          </Typography>
+          <Grid container spacing={2} alignItems="center">
+            <Grid item xs={12} md={10}>
+              <TextField
+                fullWidth
+                placeholder="Type your bet here..."
+                value={smartInput}
+                onChange={(e) => setSmartInput(e.target.value)}
+                disabled={isParsing}
+              />
+            </Grid>
+            <Grid item xs={12} md={2}>
+               <Button 
+                fullWidth 
+                variant="contained" 
+                color="secondary"
+                onClick={handleSmartParse}
+                disabled={isParsing || !smartInput}
+              >
+                {isParsing ? 'Analyzing...' : 'Auto-Fill'}
+              </Button>
+            </Grid>
+            <Grid item xs={12}>
+               {/* Placeholder for Voice Input - Roadmap Feature */}
+               <Button variant="text" startIcon={<span role="img" aria-label="mic">🎤</span>} disabled>
+                 Voice Input (Coming Soon)
+               </Button>
+            </Grid>
+          </Grid>
+        </Box>
 
         <form onSubmit={handleSubmit(onSubmit)}>
           <Grid container spacing={3}>

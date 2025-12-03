@@ -16,6 +16,7 @@ import { NewBet } from './pages/NewBet';
 import { Bankroll } from './pages/Bankroll';
 import { Statistics } from './pages/Statistics';
 import { AIPredictions } from './pages/AIPredictions';
+import { TheOracle } from './pages/TheOracle';
 import { Settings } from './pages/Settings';
 
 const theme = createTheme({
@@ -71,6 +72,7 @@ function App() {
                         <Route path="/bankroll" element={<Bankroll />} />
                         <Route path="/statistics" element={<Statistics />} />
                         <Route path="/ai-predictions" element={<AIPredictions />} />
+                        <Route path="/oracle" element={<TheOracle />} />
                         <Route path="/settings" element={<Settings />} />
                       </Routes>
                     </Layout>

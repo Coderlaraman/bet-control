@@ -14,6 +14,28 @@ from app.services.bankroll_service import BankrollService
 router = APIRouter()
 
 
+from app.services.smart_bet_entry import SmartBetEntryService
+from pydantic import BaseModel
+
+class SmartBetRequest(BaseModel):
+    text: str
+
+@router.post("/smart-entry", status_code=status.HTTP_200_OK)
+async def smart_bet_entry(
+    request: SmartBetRequest,
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Parse a natural language bet description into structured data.
+    """
+    try:
+        nlp_service = SmartBetEntryService()
+        parsed_data = nlp_service.parse_bet_description(request.text)
+        return parsed_data
+    except Exception as e:
+        logger.error(f"Error in smart bet entry: {e}")
+        raise HTTPException(status_code=500, detail="Error parsing bet description")
+
 @router.post("/", response_model=BetResponse, status_code=status.HTTP_201_CREATED)
 async def create_bet(
     bet_data: BetCreate,
@@ -38,6 +60,7 @@ async def create_bet(
         return bet
         
     except ValueError as e:
+        # Catch specific business logic errors (e.g. invalid bet amount)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error creating bet: {e}")

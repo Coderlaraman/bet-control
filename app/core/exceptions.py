@@ -8,8 +8,8 @@ class InsufficientFundsError(BetControlException):
     pass
 
 
-class InvalidBetAmountError(BetControlException):
-    """Error cuando el monto de la apuesta es inválido"""
+class InvalidBetAmountError(ValueError):
+    """Raised when bet amount is invalid (too high/low)"""
     pass
 
 

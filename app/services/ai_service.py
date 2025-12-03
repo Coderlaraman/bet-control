@@ -41,9 +41,9 @@ class AIService:
         except Exception as e:
             logger.error(f"Error loading ML model: {e}")
         
-    async def get_daily_suggestions(self, db: Session) -> List[Dict[str, Any]]:
+    async def get_daily_suggestions(self, db: Session, target_date: Optional[datetime.date] = None) -> List[Dict[str, Any]]:
         """
-        Get betting suggestions for the current day.
+        Get betting suggestions for a specific day (default: today).
         Checks local DB first; if empty, syncs from API.
         """
         try:
@@ -52,35 +52,50 @@ class AIService:
                 logger.warning("API-Football key not configured, returning mock data")
                 return await self._get_mock_suggestions()
             
-            today = datetime.now().date()
+            if target_date is None:
+                target_date = datetime.now().date()
             
             # 1. Try to fetch cached suggestions from DB
             cached_fixtures = db.query(Fixture).filter(
                 # Cast to date for comparison if needed, or range check
-                Fixture.event_date >= datetime.combine(today, datetime.min.time()),
-                Fixture.event_date < datetime.combine(today + timedelta(days=1), datetime.min.time()),
+                Fixture.event_date >= datetime.combine(target_date, datetime.min.time()),
+                Fixture.event_date < datetime.combine(target_date + timedelta(days=1), datetime.min.time()),
                 Fixture.prediction_data.isnot(None)
             ).order_by(Fixture.confidence_score.desc()).all()
             
             if cached_fixtures:
-                logger.info(f"Returning {len(cached_fixtures)} cached suggestions from DB")
+                logger.info(f"Returning {len(cached_fixtures)} cached suggestions from DB for {target_date}")
                 return [self._format_fixture_response(f) for f in cached_fixtures]
             
             # 2. If no cache, perform sync and analysis
-            logger.info("No cached suggestions found, syncing from API...")
-            return await self._sync_and_analyze(db)
+            logger.info(f"No cached suggestions found for {target_date}, syncing from API...")
+            suggestions = await self._sync_and_analyze(db, target_date)
+
+            # If still no suggestions, try tomorrow automatically
+            if not suggestions and target_date == datetime.now().date():
+                logger.info("No matches found for today. Checking tomorrow...")
+                tomorrow = target_date + timedelta(days=1)
+                return await self.get_daily_suggestions(db, target_date=tomorrow)
+                
+            return suggestions
             
         except Exception as e:
             logger.error(f"Error fetching AI suggestions: {str(e)}")
             # Fallback to mock data on error
             return await self._get_mock_suggestions()
 
-    async def _sync_and_analyze(self, db: Session) -> List[Dict[str, Any]]:
+    async def _sync_and_analyze(self, db: Session, target_date: Optional[datetime.date] = None) -> List[Dict[str, Any]]:
         """
         Fetch matches from API, save to DB, run analysis, and return results.
         """
         # 1. Fetch matches from API
-        matches_data = await self._fetch_daily_matches()
+        if target_date is None:
+            target_date = datetime.now().date()
+        matches_data = await self._fetch_daily_matches(target_date)
+        
+        if not matches_data:
+            logger.warning(f"No matches found for {target_date}")
+            return []
         
         suggestions = []
         
@@ -149,11 +164,21 @@ class AIService:
             **fixture.prediction_data
         }
 
-    async def _fetch_daily_matches(self) -> List[Dict[str, Any]]:
+    async def _fetch_daily_matches(self, target_date: datetime.date, season: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Fetch today's matches from API-Football.
+        Fetch matches for a specific date from API-Football.
         """
-        today = datetime.now().strftime("%Y-%m-%d")
+        date_str = target_date.strftime("%Y-%m-%d")
+        
+        if season is None:
+            # Auto-detect season based on date
+            # For major European leagues:
+            # Aug-Dec -> Year
+            # Jan-May -> Year - 1
+            if target_date.month >= 7:
+                season = target_date.year
+            else:
+                season = target_date.year - 1
         
         headers = {
             "x-rapidapi-key": self.api_key,
@@ -168,20 +193,28 @@ class AIService:
                 all_matches = []
                 
                 for league_id in leagues:
+                    params = {
+                        "league": league_id,
+                        "date": date_str,
+                        "season": season
+                    }
+                    logger.info(f"Fetching fixtures: {self.base_url}/fixtures params={params}")
+                    
                     response = await client.get(
                         f"{self.base_url}/fixtures",
                         headers=headers,
-                        params={
-                            "league": league_id,
-                            "date": today,
-                            "season": datetime.now().year
-                        },
+                        params=params,
                         timeout=10.0
                     )
+                    
+                    logger.info(f"API Response Status: {response.status_code}")
+                    if response.status_code != 200:
+                        logger.error(f"API Error: {response.text}")
                     
                     if response.status_code == 200:
                         data = response.json()
                         fixtures = data.get("response", [])
+                        logger.info(f"Found {len(fixtures)} fixtures for league {league_id}")
                         
                         for fixture in fixtures[:2]:  # Limit to 2 per league for quota safety
                             match_data = await self._parse_fixture(fixture, client, headers)
@@ -232,13 +265,14 @@ class AIService:
         Fetch team statistics from API-Football.
         """
         try:
+            season_year = datetime.now().year if datetime.now().month >= 7 else datetime.now().year - 1
             response = await client.get(
                 f"{self.base_url}/teams/statistics",
                 headers=headers,
                 params={
                     "team": team_id,
                     "league": league_id,
-                    "season": datetime.now().year
+                    "season": season_year
                 },
                 timeout=10.0
             )
@@ -339,8 +373,9 @@ class AIService:
                 ]
                 
                 # Add some context from stats
-                home_stats = match['home_stats']
-                reasoning.append(f"Home Form: {home_stats['wins_last_5']}/5 wins")
+                home_stats = match.get('home_stats', {}) or {}
+                wins = home_stats.get('wins_last_5', '?')
+                reasoning.append(f"Home Form: {wins}/5 wins")
                 
                 return {
                     "prediction": prediction,
@@ -355,95 +390,101 @@ class AIService:
         # 2. Fallback: Heuristic Logic
         return self._heuristic_analysis(match)
 
+    def _get_latest_elo(self, team_name: str, db: Session) -> float:
+        """
+        Get the latest known Elo rating for a team from the database.
+        """
+        # Search for the team in home or away columns, ordered by date desc
+        last_match = db.query(Fixture).filter(
+            (Fixture.home_team == team_name) | (Fixture.away_team == team_name),
+            Fixture.home_elo.isnot(None)
+        ).order_by(Fixture.event_date.desc()).first()
+        
+        if last_match:
+            if last_match.home_team == team_name:
+                return last_match.home_elo
+            else:
+                return last_match.away_elo
+                
+        # Default Elo if not found (League average approx)
+        return 1500.0
+
     def _calculate_features(self, match: Dict[str, Any], db: Session) -> Dict[str, float]:
         """
         Calculate features for a single match to feed into the ML model.
         Must match the logic in train_model.py
         """
-        # For live prediction, we might not have the full 'rolling average' readily available 
-        # unless we query previous matches for these specific teams.
-        # Simplification for V1: Use the 'home_stats' and 'away_stats' we fetched from API
-        # which contain 'wins_last_5', 'goals_avg', etc.
-        
-        # Mapping API stats to Model features
-        # Model expects: 
-        # 'home_form_goals', 'home_form_defense', 'home_form_points'
-        # 'away_form_goals', 'away_form_defense', 'away_form_points'
-        
-        home_stats = match['home_stats']
-        away_stats = match['away_stats']
-        
-        # Approximation of "Points" from "Wins last 5":
-        # Wins * 3. We don't know draws, so we assume 0 draws for conservative estimate?
-        # Or we can just use wins as a proxy for form.
-        
-        # Update: Added 'season_points' approximation based on API data
-        # API stats usually return full season Wins/Draws/Losses in the 'fixtures' sub-object
-        # but we are only fetching 'form' string here.
-        # However, 'wins_last_5' is just the last 5.
-        # To get FULL SEASON points, we ideally need the full standings.
-        # As a fallback proxy, we can project the form or just use 0 if not available.
-        # But to match training data (which uses cumulative points), we need a decent estimate.
-        
-        # Better proxy if we don't have standings: 
-        # If we have played N games (unknown), we can't guess total points easily.
-        # BUT, usually 'wins_last_5' * 3 is what we have.
-        # Wait, training data used cumulative points up to that date.
-        # For a live match, that is effectively the CURRENT POINTS in the table.
-        # Since we don't fetch standings, we will use a neutral placeholder (0) or 
-        # try to extract it if we upgrade the API call.
-        
-        # Critical: If we pass 0, the model might think it's the start of the season.
-        # Let's try to be smarter. The API response *does* have "standings" endpoint.
-        # But we are trying to save API calls.
-        
-        # Compromise for V1:
-        # We will use 0 for now, accepting that 'points_diff' will be 0, 
-        # effectively neutralizing this feature until we implement the Standings Fetcher.
-        # This is safer than guessing.
-        
-        home_season_points = 0
-        away_season_points = 0
-        
-        return {
-            'home_form_goals': home_stats.get('goals_avg', 0),
-            'home_form_defense': home_stats.get('conceded_avg', 0),
-            'home_form_points': home_stats.get('wins_last_5', 0) * 3, # Approximation
+        try:
+            # 1. Get Elo Ratings
+            home_elo = self._get_latest_elo(match['home_team'], db)
+            away_elo = self._get_latest_elo(match['away_team'], db)
+            elo_diff = home_elo - away_elo
             
-            'away_form_goals': away_stats.get('goals_avg', 0),
-            'away_form_defense': away_stats.get('conceded_avg', 0),
-            'away_form_points': away_stats.get('wins_last_5', 0) * 3,
+            # 2. Calculate Probabilities (Implied from Odds or Elo)
+            # If we have real odds, use them. Otherwise, use Elo expectation.
+            # P(Home) = 1 / (1 + 10 ^ (-diff/400))
+            elo_prob_home = 1 / (1 + 10 ** (-elo_diff / 400))
+            elo_prob_away = 1 - elo_prob_home
             
-            'home_season_points': home_season_points,
-            'away_season_points': away_season_points,
-            'points_diff': home_season_points - away_season_points
-        }
+            # Check if match has odds (not currently fetched, so default to Elo prob)
+            # In V2, we should fetch real odds.
+            prob_home = elo_prob_home
+            prob_away = elo_prob_away
+            
+            # 3. Form Stats
+            home_stats = match.get('home_stats', {}) or {}
+            away_stats = match.get('away_stats', {}) or {}
+            
+            # Debugging
+            # logger.info(f"Home Stats Type: {type(home_stats)}")
+            # logger.info(f"Home Stats: {home_stats}")
+            
+            return {
+                'elo_diff': elo_diff,
+                'prob_home': prob_home,
+                'prob_away': prob_away,
+                
+                'home_form_points': home_stats.get('wins_last_5', 0) * 3, # Approx points from last 5
+                'away_form_points': away_stats.get('wins_last_5', 0) * 3,
+                
+                'home_form_goals': home_stats.get('goals_avg', 1.0),
+                'away_form_goals': away_stats.get('goals_avg', 1.0),
+                
+                # Default shots if not available (API stats might need update to fetch these)
+                'home_form_shots': home_stats.get('shots_avg', 10.0), 
+                'away_form_shots': away_stats.get('shots_avg', 10.0)
+            }
+        except Exception as e:
+            import traceback
+            logger.error(f"Error in _calculate_features: {e}")
+            logger.error(traceback.format_exc())
+            raise e
 
     def _heuristic_analysis(self, match: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Legacy rule-based analysis.
         """
-        home_stats = match['home_stats']
-        away_stats = match['away_stats']
-        h2h = match['head_to_head']
+        home_stats = match.get('home_stats', {}) or {}
+        away_stats = match.get('away_stats', {}) or {}
+        h2h = match.get('head_to_head', {}) or {}
         
         # 1. Form Analysis
-        home_form = home_stats['wins_last_5'] / 5
-        away_form = away_stats['wins_last_5'] / 5
+        home_form = home_stats.get('wins_last_5', 2) / 5
+        away_form = away_stats.get('wins_last_5', 2) / 5
         
         # 2. Goal Analysis
-        home_attack = home_stats['goals_avg']
-        away_defense = away_stats['conceded_avg']
+        home_attack = home_stats.get('goals_avg', 1.5)
+        away_defense = away_stats.get('conceded_avg', 1.2)
         predicted_home_goals = (home_attack + away_defense) / 2
         
-        away_attack = away_stats['goals_avg']
-        home_defense = home_stats['conceded_avg']
+        away_attack = away_stats.get('goals_avg', 1.5)
+        home_defense = home_stats.get('conceded_avg', 1.2)
         predicted_away_goals = (away_attack + home_defense) / 2
         
         # 3. H2H Dominance
-        total_h2h = h2h['home_wins'] + h2h['draws'] + h2h['away_wins']
+        total_h2h = h2h.get('home_wins', 0) + h2h.get('draws', 0) + h2h.get('away_wins', 0)
         if total_h2h > 0:
-            home_dominance = h2h['home_wins'] / total_h2h
+            home_dominance = h2h.get('home_wins', 0) / total_h2h
         else:
             home_dominance = 0.5
 

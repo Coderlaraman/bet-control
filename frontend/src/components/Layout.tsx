@@ -23,6 +23,7 @@ import {
   Settings as SettingsIcon,
   Logout as LogoutIcon,
   Psychology,
+  AutoAwesome,
 } from '@mui/icons-material';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
@@ -58,6 +59,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
     { text: 'Bankroll', icon: <BankrollIcon />, path: '/bankroll' },
     { text: 'Statistics', icon: <StatsIcon />, path: '/statistics' },
     { text: 'AI Predictions', icon: <Psychology />, path: '/ai-predictions' },
+    { text: 'The Oracle', icon: <AutoAwesome />, path: '/oracle' },
     { text: 'Settings', icon: <SettingsIcon />, path: '/settings' },
   ];
 

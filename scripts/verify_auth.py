@@ -5,7 +5,7 @@ Script de verificación manual de autenticación
 import requests
 import json
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:8075"
 
 def test_admin_login():
     """Probar login con usuario admin"""
@@ -193,7 +193,7 @@ def main():
     print("\n" + "="*60)
     print("🧪 VERIFICACIÓN MANUAL DE AUTENTICACIÓN MEJORADA")
     print("="*60)
-    print("\nAsegúrese de que el servidor esté corriendo en http://localhost:8000")
+    print("\nAsegúrese de que el servidor esté corriendo en http://localhost:8075")
     input("\nPresione Enter para continuar...")
     
     try:
@@ -217,7 +217,7 @@ def main():
         
     except requests.exceptions.ConnectionError:
         print("\n❌ Error: No se pudo conectar al servidor")
-        print("   Asegúrese de que el servidor esté corriendo en http://localhost:8000")
+        print("   Asegúrese de que el servidor esté corriendo en http://localhost:8075")
     except Exception as e:
         print(f"\n❌ Error inesperado: {e}")
 
