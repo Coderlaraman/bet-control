@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 import os
 
@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     ACCOUNT_LOCKOUT_MINUTES: int = 15
     
     # CORS
-    CORS_ORIGINS: list = [
+    CORS_ORIGINS: list[str] = [
         "http://localhost:3000",
         "http://localhost:3001",
         "http://127.0.0.1:3000",
@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     API_FOOTBALL_KEY: Optional[str] = os.getenv("API_FOOTBALL_KEY")
     API_FOOTBALL_HOST: str = os.getenv("API_FOOTBALL_HOST", "v3.football.api-sports.io")
     
+    TESSERACT_PATH: Optional[str] = os.getenv("TESSERACT_PATH")
+    
     @property
     def DATABASE_URL(self) -> str:
         # Use SQLite for development if DB_HOST is 'sqlite'
@@ -64,9 +66,11 @@ class Settings(BaseSettings):
         # Otherwise use MySQL
         return f"mysql+mysqlconnector://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore"
+    )
 
 
 settings = Settings()

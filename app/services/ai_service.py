@@ -3,8 +3,14 @@ from decimal import Decimal
 from typing import List, Dict, Any, Optional
 import os
 import httpx
-import joblib
-import pandas as pd
+try:
+    import joblib  # type: ignore
+except Exception:
+    joblib = None
+try:
+    import pandas as pd  # type: ignore
+except Exception:
+    pd = None
 from loguru import logger
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
@@ -32,12 +38,15 @@ class AIService:
         self.model_columns = None
         
         try:
-            if os.path.exists(self.model_path):
+            if joblib and os.path.exists(self.model_path):
                 self.model = joblib.load(self.model_path)
                 self.model_columns = joblib.load(self.columns_path)
                 logger.info("ML Model loaded successfully.")
             else:
-                logger.warning("ML Model not found. Falling back to rule-based logic.")
+                if not joblib:
+                    logger.warning("joblib not available. Skipping ML model load and using heuristics.")
+                else:
+                    logger.warning("ML Model not found. Falling back to rule-based logic.")
         except Exception as e:
             logger.error(f"Error loading ML model: {e}")
         
@@ -346,7 +355,7 @@ class AIService:
         """
         
         # 1. Try ML Prediction
-        if self.model and self.model_columns:
+        if self.model and self.model_columns and pd:
             try:
                 features = self._calculate_features(match, db)
                 # Ensure columns match training data

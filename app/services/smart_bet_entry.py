@@ -1,4 +1,7 @@
-import spacy
+try:
+    import spacy  # type: ignore
+except Exception:
+    spacy = None
 import re
 from typing import Dict, Any, Optional
 from loguru import logger
@@ -12,7 +15,10 @@ class SmartBetEntryService:
     
     def __init__(self):
         try:
-            self.nlp = spacy.load("en_core_web_sm")
+            if spacy:
+                self.nlp = spacy.load("en_core_web_sm")
+            else:
+                self.nlp = None
         except Exception:
             self.nlp = None
             
